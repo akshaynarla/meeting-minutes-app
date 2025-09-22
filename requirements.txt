@@ -6,3 +6,4 @@ sumy               # text summarization
 pydub              # preprocessing
 pyannote.audio 
 soundfile
+streamlit

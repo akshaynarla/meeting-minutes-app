@@ -1,15 +1,16 @@
-import argparse, re, os, csv, math
+from __future__ import annotations
+import os, re, json
 from datetime import datetime
-from pathlib import Path
+from typing import Dict, List, Optional
 
-# Abstractive summarization (downloads a model once)
-USE_TRANSFORMERS = True
+# Abstractive summarization (CPU only, model downloads once)
 try:
-    from transformers import pipeline, AutoTokenizer
+    from transformers import pipeline as hf_pipeline
+    HAVE_TRANSFORMERS = True
 except Exception:
-    USE_TRANSFORMERS = False
+    HAVE_TRANSFORMERS = False
 
-# Lightweight extractive fallback (very small, CPU-only)
+# Lightweight extractive fallback
 try:
     from sumy.parsers.plaintext import PlaintextParser
     from sumy.nlp.tokenizers import Tokenizer
@@ -18,167 +19,183 @@ try:
 except Exception:
     HAVE_SUMY = False
 
-# Patterns for action item extraction
 ACTION_VERBS = r"(will|to|need to|should|must|plan to|aim to|schedule|send|draft|review|prepare|follow up|create|update|implement|investigate|decide|align|share|present|document)"
-DUE_HINT = r"(by|before|on|due|deadline|EOD|end of day|tomorrow|next week|next Monday|Friday|[0-9]{4}-[0-9]{2}-[0-9]{2})"
-FILLER_WORDS = r"\b(uh|um|like|kind of|sort of)\b"
+DUE_HINT = r"(by|before|on|due|deadline|EOD|end of day|tomorrow|next week|next Monday|Friday|\b\d{4}-\d{2}-\d{2}\b)"
+FILLER_WORDS = r"\b(uh|um|you know|like|kind of|sort of)\b"
 DECISION_WORDS = r"\b(decided|agree|agreed|decision|conclude|concluded|approved|choose|chose|go with)\b"
+DAY_HINT = r"(\b\d{4}-\d{2}-\d{2}\b|\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*\b|\b(next week|tomorrow|EOD)\b)"
 
-def read_text(p):
-    with open(p, "r", encoding="utf-8") as f:
+def _read(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
-# Remove whitespaces and strip filler tokens
-def clean_text(t: str) -> str:
-    t = re.sub(FILLER_WORDS, "", t, flags=re.IGNORECASE)
+def _write(path: str, text: str):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+def _split_sentences(text: str) -> List[str]:
+    text = text.replace("\n", " ")
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    return [p.strip() for p in parts if p.strip()]
+
+def _clean_filler(text: str) -> str:
+    t = re.sub(FILLER_WORDS, "", text, flags=re.I)
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
-# simple splitter to avoid large deps
-def split_into_sentences(t: str):
-    t = t.replace("\n", " ")
-    parts = re.split(r"(?<=[.!?])\s+", t)
-    return [s.strip() for s in parts if s.strip()]
-
-def abstractive_summary(text: str, model_name="sshleifer/distilbart-cnn-12-6",
-                        max_chunk_chars=2800, min_len=80, max_len=220):
-    if not USE_TRANSFORMERS:
+# Abstractive summarizing involves generating new sentences that capture the essence of the original text.
+# An abstractive summarizer presents the material in a logical, well-organized, and grammatically sound form. 
+# A summary’s quality can be significantly enhanced by making it more readable or improving its linguistic quality.
+def abstractive_summary(text: str, model_name: str = "sshleifer/distilbart-cnn-12-6") -> Optional[str]:
+    if not HAVE_TRANSFORMERS:
         return None
     try:
-        summarizer = pipeline("summarization", model=model_name)
+        summarizer = hf_pipeline("summarization", model=model_name)
     except Exception:
         return None
-    chunks = []
-    i = 0
+
+    # chunk into safe windows for model context
+    max_chars = 2800
+    chunks, i = [], 0
     while i < len(text):
-        chunk = text[i:i+max_chunk_chars]
-        # try to not split mid-sentence
+        chunk = text[i:i+max_chars]
         last = max(chunk.rfind(". "), chunk.rfind("? "), chunk.rfind("! "))
         if last > 0 and len(chunk) > 1200:
             chunk = chunk[:last+1]
         chunks.append(chunk)
         i += len(chunk)
-    outs = []
-    for c in chunks:
-        out = summarizer(c, max_length=max_len, min_length=min_len, do_sample=False)[0]["summary_text"]
-        outs.append(out.strip())
-    # If multiple chunks, summarize the summaries
+
+    outs = [summarizer(c, max_length=220, min_length=80, do_sample=False)[0]["summary_text"].strip()
+            for c in chunks]
     combined = " ".join(outs)
     if len(outs) > 1:
-        final = summarizer(combined, max_length=max_len, min_length=min_len, do_sample=False)[0]["summary_text"]
-        return final.strip()
-    return combined.strip()
+        final = summarizer(combined, max_length=220, min_length=80, do_sample=False)[0]["summary_text"].strip()
+        return final
+    return combined
 
-def extractive_summary(text: str, sentences=10):
+# Extractive summarizing involves picking the most relevant sentences from a document and 
+# organizing them systemtically.
+# LexRank algorithm, a sentence that is similar to many other sentences of the text 
+# has a high probability of being important.
+# https://www.cs.cmu.edu/afs/cs/project/jair/pub/volume22/erkan04a-html/erkan04a.html
+def extractive_summary(text: str, sentences: int = 10) -> Optional[str]:
     if not HAVE_SUMY:
         return None
     parser = PlaintextParser.from_string(text, Tokenizer("english"))
-    summarizer = LexRankSummarizer()
-    summary = summarizer(parser.document, sentences)
-    return " ".join(str(s) for s in summary)
+    summ = LexRankSummarizer()
+    sents = summ(parser.document, sentences)
+    return " ".join(str(s) for s in sents)
 
-def extract_decisions(sentences):
-    decisions = []
+def extract_decisions(sentences: List[str]) -> List[str]:
+    out = []
     for s in sentences:
         if re.search(DECISION_WORDS, s, re.I):
-            decisions.append(s)
-    return decisions
+            out.append(s)
+    return out
 
-def extract_actions(sentences, segments=None):
+def extract_actions(sentences: List[str], whisper_json_path: Optional[str]) -> List[Dict]:
+    segs = None
+    if whisper_json_path and os.path.exists(whisper_json_path):
+        with open(whisper_json_path, "r", encoding="utf-8") as f:
+            segs = json.load(f).get("segments", [])
+
     items = []
     for s in sentences:
         if re.search(ACTION_VERBS, s, re.I):
             owner = None
-            # naive owner guess: leading proper noun or "I/We/John/…"
             m = re.match(r"^([A-Z][a-z]+(?: [A-Z][a-z]+)?)\b[:,\- ]", s)
             if m: owner = m.group(1)
             due = None
             if re.search(DUE_HINT, s, re.I):
-                # try to pull a simple date-like token
-                mdate = re.search(r"(\b\d{4}-\d{2}-\d{2}\b|\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*\b|\b(next week|tomorrow|EOD)\b)", s, re.I)
+                mdate = re.search(DAY_HINT, s, re.I)
                 if mdate: due = mdate.group(1)
-            ts = None
-            if segments:
-                # crude mapping: find a segment whose text contains this sentence
-                for seg in segments:
+            ts = ""
+            if segs:
+                for seg in segs:
                     if s.strip() in seg["text"]:
                         ts = f"{seg['start']:.1f}–{seg['end']:.1f}s"
                         break
-            items.append({"task": s, "owner": owner or "", "due": due or "", "timestamp": ts or ""})
+            items.append({"task": s, "owner": owner or "", "due": due or "", "timestamp": ts})
     return items
 
-def load_segments_json(path):
-    import json
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("segments", [])
-    except Exception:
-        return None
+def write_minutes_md(
+    path_md: str,
+    title: str,
+    summary: str,
+    key_points: List[str],
+    decisions: List[str],
+    actions: List[Dict],
+):
+    lines = [f"# {title}", "", "## Executive Summary", summary or "N/A", "", "## Key Points"]
+    if key_points:
+        lines += [f"- {kp}" for kp in key_points]
+    else:
+        lines.append("- N/A")
+    lines += ["", "## Decisions"]
+    if decisions:
+        lines += [f"- {d}" for d in decisions]
+    else:
+        lines.append("- N/A")
+    lines += ["", "## Action Items"]
+    if actions:
+        for a in actions:
+            meta = []
+            if a["owner"]: meta.append(f"**Owner:** {a['owner']}")
+            if a["due"]:   meta.append(f"**Due:** {a['due']}")
+            if a["timestamp"]: meta.append(f"**When discussed:** {a['timestamp']}")
+            suffix = f" ({', '.join(meta)})" if meta else ""
+            lines.append(f"- {a['task']}{suffix}")
+    else:
+        lines.append("- N/A")
+    _write(path_md, "\n".join(lines) + "\n")
 
-def write_markdown(path, title, summary, key_points, decisions, actions):
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(f"# {title}\n\n")
-        f.write("## Executive Summary\n")
-        f.write((summary or "N/A").strip() + "\n\n")
-        f.write("## Key Points\n")
-        if key_points:
-            for kp in key_points:
-                f.write(f"- {kp}\n")
-        else:
-            f.write("- N/A\n")
-        f.write("\n## Decisions\n")
-        if decisions:
-            for d in decisions:
-                f.write(f"- {d}\n")
-        else:
-            f.write("- N/A\n")
-        f.write("\n## Action Items\n")
-        if actions:
-            for a in actions:
-                line = f"- {a['task']}"
-                meta = []
-                if a["owner"]: meta.append(f"**Owner:** {a['owner']}")
-                if a["due"]:   meta.append(f"**Due:** {a['due']}")
-                if a["timestamp"]: meta.append(f"**When discussed:** {a['timestamp']}")
-                if meta: line += "  (" + ", ".join(meta) + ")"
-                f.write(line + "\n")
-        else:
-            f.write("- N/A\n")
-
-def write_actions_csv(path, actions):
-    if not actions: return
-    with open(path, "w", newline="", encoding="utf-8") as f:
+def write_actions_csv(path_csv: str, actions: List[Dict]):
+    if not actions:
+        return
+    os.makedirs(os.path.dirname(path_csv), exist_ok=True)
+    with open(path_csv, "w", newline="", encoding="utf-8") as f:
+        import csv
         w = csv.DictWriter(f, fieldnames=["task","owner","due","timestamp"])
         w.writeheader()
         w.writerows(actions)
 
-def meeting_minutes(args):
-    # Read and preprocess transcript
-    raw = read_text(args.transcript_txt)
-    text = clean_text(raw)
-    sents = split_into_sentences(text)
+def make_minutes_from_text(
+    transcript_text_path: str,
+    whisper_json_path: Optional[str] = None,
+    out_dir: str = "outputs",
+    summary_mode: str = "auto",
+    abstractive_model: str = "sshleifer/distilbart-cnn-12-6",
+    key_points_n: int = 8,
+) -> Dict[str, str]:
+    if not os.path.exists(transcript_text_path):
+        raise FileNotFoundError(f"Transcript not found: {transcript_text_path}")
 
-    # Summary
+    base = os.path.splitext(os.path.basename(transcript_text_path))[0]
+    run_dir = os.path.join(out_dir, f"{base}_minutes")
+    os.makedirs(run_dir, exist_ok=True)
+
+    raw = _read(transcript_text_path)
+    cleaned = _clean_filler(raw)
+    sentences = _split_sentences(cleaned)
+
     summary = None
-    if args.summary_mode in ("auto","abstractive"):
-        summary = abstractive_summary(text, model_name=args.abstractive_model)
-    if not summary and args.summary_mode in ("auto","extractive"):
-        summary = extractive_summary(text, sentences=10)
+    if summary_mode in ("auto", "abstractive"):
+        summary = abstractive_summary(cleaned, model_name=abstractive_model)
+    if not summary and summary_mode in ("auto", "extractive"):
+        summary = extractive_summary(cleaned, sentences=10)
+    if not summary:
+        summary = " ".join(sentences[:min(8, len(sentences))])
 
-    # Key points: pick top-N representative sentences (very simple)
-    kp = sents[:max(3, min(args.key_points, len(sents)))]
+    key_points = sentences[:max(3, min(key_points_n, len(sentences)))]
+    decisions = extract_decisions(sentences)
+    actions = extract_actions(sentences, whisper_json_path)
 
-    # Decisions + Actions
-    segments = load_segments_json(args.segments_json) if args.segments_json else None
-    decisions = extract_decisions(sents)
-    actions = extract_actions(sents, segments)
+    md_path = os.path.join(run_dir, f"{base}_minutes.md")
+    csv_path = os.path.join(run_dir, f"{base}_actions.csv")
 
-    # Write outputs
     title = f"Meeting Minutes – {datetime.now().strftime('%Y-%m-%d')}"
-    write_markdown(args.out_md, title, summary, kp, decisions, actions)
-    write_actions_csv(args.out_csv, actions)
+    write_minutes_md(md_path, title, summary, key_points, decisions, actions)
+    write_actions_csv(csv_path, actions)
 
-    print("Minutes written:", os.path.abspath(args.out_md))
-    if actions:
-        print("Action items CSV:", os.path.abspath(args.out_csv))
+    return {"minutes_md": md_path, "actions_csv": csv_path, "dir": run_dir}

@@ -1,52 +1,56 @@
-import argparse
-import os
-import json
+from __future__ import annotations
+import os, json
+from typing import Optional, Dict
 import whisper
+from whisper.utils import get_writer
 
-def transcribe(args):
-    # Ensure output directory exists
-    os.makedirs(args.output_dir, exist_ok=True)
+def _ensure_dir(p: str) -> str:
+    os.makedirs(p, exist_ok=True)
+    return p
 
-    print(f"Loading Whisper model: {args.model} (CPU)…")
-    model = whisper.load_model(args.model, device="cpu")
+def transcribe_whisper(
+    audio_path: str,
+    model_size: str = "base",
+    language: Optional[str] = None,
+    translate: bool = False,
+    output_dir: str = "outputs"
+) -> Dict[str, str]:
+    """
+    CPU-only transcription with Whisper.
+    Returns dict with paths: text, json, srt, vtt, dir.
+    """
+    if not os.path.exists(audio_path):
+        raise FileNotFoundError(f"Audio not found: {audio_path}")
 
-    print(f"Transcribing: {args.audio_path}")
+    _ensure_dir(output_dir)
+    base = os.path.splitext(os.path.basename(audio_path))[0]
+    run_dir = _ensure_dir(os.path.join(output_dir, f"{base}_transcript"))
+
+    model = whisper.load_model(model_size, device="cpu")
     result = model.transcribe(
-        args.audio_path,
-        fp16=False,                 # set CPU mode
-        language=args.language,     # None -> auto-detect
-        task="translate" if args.translate else "transcribe",
-        verbose=False
+        audio_path,
+        fp16=False,  # CPU
+        language=language,
+        task="translate" if translate else "transcribe",
+        verbose=False,
     )
 
-    # Base filename without extension
-    base = os.path.splitext(os.path.basename(args.audio_path))[0]
-    out_txt = os.path.join(args.output_dir, f"{base}.txt")
-    out_json = os.path.join(args.output_dir, f"{base}.json")
-
-    # Plain text transcript
-    with open(out_txt, "w", encoding="utf-8") as f:
+    txt = os.path.join(run_dir, f"{base}.txt")
+    jsn = os.path.join(run_dir, f"{base}.json")
+    with open(txt, "w", encoding="utf-8") as f:
         f.write(result["text"].strip() + "\n")
-
-    # Full JSON (includes segments with start/end timestamps)
-    with open(out_json, "w", encoding="utf-8") as f:
+    with open(jsn, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
 
-    # Subtitles (SRT + VTT) using Whisper writers: suitable for videos
-    # for ext in ["srt", "vtt", "tsv"]:
-    #    writer = get_writer(ext, args.output_dir)
-    #    writer(result, base)
+    # Sidecar subtitle files
+    for ext in ["srt", "vtt", "tsv"]:
+        writer = get_writer(ext, run_dir)
+        writer(result, base)
 
-    # timestamped transcript
-    if args.diarize_hint:
-        ts_path = os.path.join(args.output_dir, f"{base}_timestamped.txt")
-        with open(ts_path, "w", encoding="utf-8") as f:
-            for seg in result.get("segments", []):
-                start = seg["start"]
-                end = seg["end"]
-                text = seg["text"].strip()
-                f.write(f"[{start:7.2f}–{end:7.2f}] {text}\n")
-
-    print("Transcription Complete")
-    print(f"• Text: {out_txt}")
-    print(f"• JSON: {out_json}")
+    return {
+        "text": txt,
+        "json": jsn,
+        "srt": os.path.join(run_dir, f"{base}.srt"),
+        "vtt": os.path.join(run_dir, f"{base}.vtt"),
+        "dir": run_dir,
+    }
