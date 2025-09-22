@@ -1,2 +1,30 @@
 .mp3
+
+# Byte-compiled / cache
 __pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual envs (optional but recommended)
+.venv/
+venv/
+env/
+
+# Tools & test caches (optional)
+.pytest_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+.hypothesis/
+
+# Build artifacts (optional)
+build/
+dist/
+*.egg-info/
+
+# OS/editor noise (optional)
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
