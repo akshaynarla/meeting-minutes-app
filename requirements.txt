@@ -2,8 +2,8 @@
 openai-whisper     # speech-to-text
 transformers       # summarization
 sentencepiece      # needed for transformers models
-sumy               # text summarization
 pydub              # preprocessing
 pyannote.audio 
 soundfile
 streamlit
+requests

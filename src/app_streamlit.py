@@ -1,7 +1,7 @@
 import os, tempfile
 import streamlit as st
 
-# Import your modules
+# Import modules necessary for the app
 from audio_to_text import transcribe_whisper
 from conversation_maker import (
     run_diarization, assign_speakers_to_whisper_segments,
@@ -9,31 +9,43 @@ from conversation_maker import (
 )
 from text_to_meetmins import make_minutes_from_text
 
-st.set_page_config(page_title="Meeting Assistant", page_icon="🗣️", layout="wide")
+LOGO = "resources/ias.jpg"
+LOGO_LINK = "https://www.ias.uni-stuttgart.de"
+
+# streamlit run app_streamlit.py - runs the app/server locally created for making the meeting minutes using the above
+# modules (which are the buttons in this app)
+# set_page_config -- used for the title on the tab.
+st.set_page_config(page_title="Meeting Assistant", page_icon=LOGO, layout="wide")
 st.title("🗣️ Meeting Assistant")
 
-# ---------------- Sidebar: Inputs ----------------
+# ---------------- Sidebar: Inputs (arguments in CLI) ----------------
+# https://docs.streamlit.io/get-started/fundamentals/main-concepts
+# Streamlit has built-in widgets like file_uploader, text_input, checkbox, selectbox, number_input, slider, button
 with st.sidebar:
+    st.logo(image=LOGO, size="large", link= LOGO_LINK)
+    
     st.header("Inputs")
-    audio_file = st.file_uploader("Audio/Video", type=["mp3","wav","m4a","mp4","mov"])
+    audio_file = st.file_uploader("Audio/Video", type=["mp3","wav","m4a","mp4","mov"])        # creates a file upload button with an upload section.
     out_dir = st.text_input("Output folder", value="outputs")
 
     st.header("Transcription")
-    whisper_model = st.selectbox("Whisper model (CPU)", ["tiny","base","small","medium"], index=1)
-    language = st.text_input("Language code (optional, e.g., 'en')", value="")
+    whisper_model = st.selectbox("Whisper model", ["tiny","base","small","medium","large"], index=1)
+    language = st.text_input("Language code", value="")
     translate = st.checkbox("Translate to English instead of transcribe", value=False)
 
-    st.header("Diarization (optional)")
-    do_diar = st.checkbox("Enable diarization (pyannote)", value=False)
-    num_speakers = st.number_input("Known number of speakers (optional)", min_value=0, value=0, step=1)
+    st.header("Speaker Identification")
+    do_diar = st.checkbox("Enable Speaker Identification", value=False)
+    num_speakers = st.number_input("Known number of speakers", min_value=0, value=0, step=1)
     hf_token = st.text_input("Hugging Face READ token", type="password")
 
     st.header("Minutes")
-    summary_mode = st.selectbox("Summary mode", ["auto","abstractive","extractive"], index=0)
-    abstractive_model = st.text_input("Abstractive model", value="sshleifer/distilbart-cnn-12-6")
-    key_points_n = st.slider("Key points to list", 5, 20, 8)
+    st.subheader("Use existing transcript for minutes:")
+    uploaded_transcript = st.file_uploader("Transcript file (.txt or .md)", type=["txt","md"])
+    llm_model = st.text_input("Ollama model", value="llama3.1:8b")
+    llm_base  = st.text_input("Ollama base URL", value="http://localhost:11434")
 
-# Session state holders
+# Session state holders: https://docs.streamlit.io/get-started/fundamentals/advanced-concepts#session-state
+# holds the tab details. Opening a new session will create a new session.
 if "transcript" not in st.session_state:
     st.session_state.transcript = None  # dict of paths from transcribe_whisper
 if "merged_segments" not in st.session_state:
@@ -47,30 +59,52 @@ if "minutes" not in st.session_state:
 
 # ---------------- Main UI ----------------
 st.subheader("1) Transcribe")
-
+# col1 and col2: would be side-by-side. Here button on left and the output on right.
+# st.button returns True if clicked, else False.
 col1, col2 = st.columns([1,1])
 with col1:
     run_transcribe = st.button("Run Transcription")
 
 with col2:
-    if st.session_state.transcript:
-        st.success("Transcription already completed.")
-        st.write("**Text:**", st.session_state.transcript["text"])
-        st.write("**JSON:**", st.session_state.transcript["json"])
-        st.write("**SRT:**",  st.session_state.transcript["srt"])
-        st.write("**VTT:**",  st.session_state.transcript["vtt"])
+    load_transcript_btn = st.button("Load Uploaded Transcript")
 
+if load_transcript_btn:
+    if not uploaded_transcript:
+        st.error("Upload a .txt or .md transcript in the sidebar first.")
+        st.stop()
+
+    suffix = os.path.splitext(uploaded_transcript.name)[1] or ".txt"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded_transcript.getbuffer())
+        tmp_path = tmp.name
+
+    # Mimic the structure for further steps
+    st.session_state.transcript = {
+        "text": tmp_path,
+        "json": "",
+        "dir": os.path.dirname(tmp_path)
+    }
+    st.session_state.conversation_path = None  # reset if user switches sources
+
+    st.success(f"Loaded transcript: {uploaded_transcript.name}")
+    with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
+        preview = f.read(1200)
+    st.code(preview + ("..." if len(preview) == 1200 else ""), language="markdown")
+
+    st.stop() 
+
+# Upon click of the button, execute:
 if run_transcribe:
     if not audio_file:
         st.error("Please upload an audio/video file.")
         st.stop()
 
-    # Persist upload to temp file so whisper can read it
+    # Persist upload to temp file so whisper can read it. Creates temp files using the lib tempfile.
     with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(audio_file.name)[1]) as tmp:
         tmp.write(audio_file.getbuffer())
         tmp_path = tmp.name
 
-    with st.status("Transcribing (Whisper, CPU)…", expanded=True) as s:
+    with st.status("Transcribing using Whisper…", expanded=True) as s:
         st.session_state.transcript = transcribe_whisper(
             audio_path=tmp_path,
             model_size=whisper_model,
@@ -92,10 +126,7 @@ if run_transcribe:
     st.download_button("Download subtitles (.srt)",
         file_name=os.path.basename(st.session_state.transcript["srt"]),
         data=open(st.session_state.transcript["srt"], "rb").read())
-    st.download_button("Download subtitles (.vtt)",
-        file_name=os.path.basename(st.session_state.transcript["vtt"]),
-        data=open(st.session_state.transcript["vtt"], "rb").read())
-
+    
 st.markdown("---")
 st.subheader("2) Conversation (Speaker-labeled)")
 
@@ -170,35 +201,34 @@ st.subheader("3) Meeting Minutes")
 
 run_minutes = st.button("Generate Minutes")
 if run_minutes:
-    if not st.session_state.transcript:
-        st.error("Run transcription first.")
-        st.stop()
-
     source_txt = (
-        st.session_state.conversation_path  # use conversation if available
+        st.session_state.conversation_path
         if st.session_state.conversation_path
-        else st.session_state.transcript["text"]
+        else (st.session_state.transcript["text"] if st.session_state.transcript else None)
     )
 
-    with st.status("Generating minutes…", expanded=True) as s:
-        st.session_state.minutes = make_minutes_from_text(
+    if not source_txt:
+        st.error("No transcript available. Transcribe audio or load a .txt/.md transcript first.")
+        st.stop()
+
+    with st.status("Calling Ollama and assembling minutes…", expanded=True) as s:
+        res = make_minutes_from_text(
             transcript_text_path=source_txt,
-            whisper_json_path=st.session_state.transcript["json"],
             out_dir=out_dir,
-            summary_mode=summary_mode,
-            abstractive_model=abstractive_model,
-            key_points_n=key_points_n
+            model=llm_model,
+            base_url=llm_base,
+            title="Meeting Minutes",
         )
         s.update(label="Minutes ready ✅", state="complete")
 
-    # Preview + downloads
-    with open(st.session_state.minutes["minutes_md"], "r", encoding="utf-8") as f:
+    # Preview & downloads
+    with open(res["minutes_md"], "r", encoding="utf-8") as f:
         preview = "".join([next(f) for _ in range(40)])
     st.code(preview, language="markdown")
 
-    st.download_button("Download minutes (.md)",
-        file_name=os.path.basename(st.session_state.minutes["minutes_md"]),
-        data=open(st.session_state.minutes["minutes_md"], "rb").read())
-    st.download_button("Download action items (.csv)",
-        file_name=os.path.basename(st.session_state.minutes["actions_csv"]),
-        data=open(st.session_state.minutes["actions_csv"], "rb").read())
+    st.download_button("Download Minutes (.md)",
+        file_name=os.path.basename(res["minutes_md"]),
+        data=open(res["minutes_md"], "rb").read())
+    st.download_button("Download Minutes (.txt)",
+        file_name=os.path.basename(res["minutes_txt"]),
+        data=open(res["minutes_txt"], "rb").read())

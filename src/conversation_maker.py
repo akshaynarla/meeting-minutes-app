@@ -3,7 +3,7 @@ import os, json, re
 from datetime import timedelta
 from typing import Dict, List, Optional
 
-# pyannote pulls huggingface_hub and also just CPU. You'll need a HF read token.
+# You'll need a HF read token. Accept the terms of the pyannote in the huggingface page. Generate a read token then.
 from pyannote.audio import Pipeline as PyannotePipeline
 
 def _hms(seconds: float) -> str:

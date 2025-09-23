@@ -1,201 +1,210 @@
+# LLM (Ollama) meeting minutes generator.
+# Ollama should be running locally (http://localhost:11434)
+# to-do: remove bloaty code and reduce unnecessary code.
+
 from __future__ import annotations
-import os, re, json
+import os, re, json, csv, argparse, sys
+from typing import Dict, List
+import requests
 from datetime import datetime
-from typing import Dict, List, Optional
 
-# Abstractive summarization (CPU only, model downloads once)
-try:
-    from transformers import pipeline as hf_pipeline
-    HAVE_TRANSFORMERS = True
-except Exception:
-    HAVE_TRANSFORMERS = False
+SYSTEM_PROMPT = """You are an expert meeting scribe.
+Given a meeting transcript, produce STRICT JSON with:
+1) "summary": a faithful, concise 5–8 sentence executive summary
+2) "key_points": up to 10 bullet-level points
+3) "decisions": only finalized decisions (no plans)
+4) "actions": list of { "task", "owner", "due", "timestamp" }
+   - "owner": person responsible if known, else ""
+   - "due": explicit due (e.g., "2025-09-23", "next week", "Friday", "EOD"), else ""
+   - "timestamp": if transcript lines contain [HH:MM:SS] near where the action was discussed, include one; else ""
+Rules:
+- Be faithful. Do NOT invent names, dates, or outcomes.
+- Use short, clear sentences. No fluff.
+Return ONLY valid JSON (no markdown fences, no commentary).
+Schema:
+{
+  "summary": "string",
+  "key_points": ["string", ...],
+  "decisions": ["string", ...],
+  "actions": [{"task":"string","owner":"string","due":"string","timestamp":"string"}, ...]
+}
+"""
 
-# Lightweight extractive fallback
-try:
-    from sumy.parsers.plaintext import PlaintextParser
-    from sumy.nlp.tokenizers import Tokenizer
-    from sumy.summarizers.lex_rank import LexRankSummarizer
-    HAVE_SUMY = True
-except Exception:
-    HAVE_SUMY = False
-
-ACTION_VERBS = r"(will|to|need to|should|must|plan to|aim to|schedule|send|draft|review|prepare|follow up|create|update|implement|investigate|decide|align|share|present|document)"
-DUE_HINT = r"(by|before|on|due|deadline|EOD|end of day|tomorrow|next week|next Monday|Friday|\b\d{4}-\d{2}-\d{2}\b)"
-FILLER_WORDS = r"\b(uh|um|you know|like|kind of|sort of)\b"
-DECISION_WORDS = r"\b(decided|agree|agreed|decision|conclude|concluded|approved|choose|chose|go with)\b"
-DAY_HINT = r"(\b\d{4}-\d{2}-\d{2}\b|\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*\b|\b(next week|tomorrow|EOD)\b)"
-
-def _read(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
-
-def _write(path: str, text: str):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
-
-def _split_sentences(text: str) -> List[str]:
-    text = text.replace("\n", " ")
-    parts = re.split(r"(?<=[.!?])\s+", text)
-    return [p.strip() for p in parts if p.strip()]
-
-def _clean_filler(text: str) -> str:
-    t = re.sub(FILLER_WORDS, "", text, flags=re.I)
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
-
-# Abstractive summarizing involves generating new sentences that capture the essence of the original text.
-# An abstractive summarizer presents the material in a logical, well-organized, and grammatically sound form. 
-# A summary’s quality can be significantly enhanced by making it more readable or improving its linguistic quality.
-def abstractive_summary(text: str, model_name: str = "sshleifer/distilbart-cnn-12-6") -> Optional[str]:
-    if not HAVE_TRANSFORMERS:
-        return None
-    try:
-        summarizer = hf_pipeline("summarization", model=model_name)
-    except Exception:
-        return None
-
-    # chunk into safe windows for model context
-    max_chars = 2800
-    chunks, i = [], 0
+def _chunk_text(text: str, max_chars: int = 12000) -> List[str]:
+    if len(text) <= max_chars:
+        return [text]
+    parts, i = [], 0
     while i < len(text):
         chunk = text[i:i+max_chars]
-        last = max(chunk.rfind(". "), chunk.rfind("? "), chunk.rfind("! "))
-        if last > 0 and len(chunk) > 1200:
+        last = max(chunk.rfind(". "), chunk.rfind("? "), chunk.rfind("! "), chunk.rfind("\n"))
+        if last > 1000:
             chunk = chunk[:last+1]
-        chunks.append(chunk)
+        parts.append(chunk)
         i += len(chunk)
+    return parts
 
-    outs = [summarizer(c, max_length=220, min_length=80, do_sample=False)[0]["summary_text"].strip()
-            for c in chunks]
-    combined = " ".join(outs)
-    if len(outs) > 1:
-        final = summarizer(combined, max_length=220, min_length=80, do_sample=False)[0]["summary_text"].strip()
-        return final
-    return combined
+def _call_ollama(messages: List[Dict[str, str]], model: str, base_url: str) -> str:
+    payload = {"model": model, "messages": messages, "stream": False}
+    r = requests.post(f"{base_url.rstrip('/')}/api/chat", json=payload, timeout=1800)
+    r.raise_for_status()
+    data = r.json()
+    return data["message"]["content"]
 
-# Extractive summarizing involves picking the most relevant sentences from a document and 
-# organizing them systemtically.
-# LexRank algorithm, a sentence that is similar to many other sentences of the text 
-# has a high probability of being important.
-# https://www.cs.cmu.edu/afs/cs/project/jair/pub/volume22/erkan04a-html/erkan04a.html
-def extractive_summary(text: str, sentences: int = 10) -> Optional[str]:
-    if not HAVE_SUMY:
-        return None
-    parser = PlaintextParser.from_string(text, Tokenizer("english"))
-    summ = LexRankSummarizer()
-    sents = summ(parser.document, sentences)
-    return " ".join(str(s) for s in sents)
+def _extract_json(text: str) -> dict:
+    s = text.strip()
+    s = re.sub(r"^```(json)?\s*|\s*```$", "", s, flags=re.I | re.M).strip()
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", s, flags=re.S)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            pass
+    # last resort fallback
+    return {"summary": s[:1000], "key_points": [], "decisions": [], "actions": []}
 
-def extract_decisions(sentences: List[str]) -> List[str]:
-    out = []
-    for s in sentences:
-        if re.search(DECISION_WORDS, s, re.I):
-            out.append(s)
+def _combine_minutes(parts: List[dict]) -> dict:
+    out = {"summary": "", "key_points": [], "decisions": [], "actions": []}
+    for p in parts:
+        if not isinstance(p, dict): 
+            continue
+        if p.get("summary"):
+            out["summary"] += (" " if out["summary"] else "") + str(p["summary"]).strip()
+        out["key_points"].extend([x for x in (p.get("key_points") or []) if isinstance(x, str)])
+        out["decisions"].extend([x for x in (p.get("decisions") or []) if isinstance(x, str)])
+        for a in p.get("actions") or []:
+            if isinstance(a, dict) and a.get("task"):
+                out["actions"].append({
+                    "task": str(a.get("task","")).strip(),
+                    "owner": str(a.get("owner","")).strip(),
+                    "due": str(a.get("due","")).strip(),
+                    "timestamp": str(a.get("timestamp","")).strip(),
+                })
+    def _dedupe(seq):
+        seen, res = set(), []
+        for x in seq:
+            if x not in seen:
+                seen.add(x); res.append(x)
+        return res
+    out["key_points"] = _dedupe(out["key_points"])[:10]
+    out["decisions"] = _dedupe(out["decisions"])
+    seen = set(); uniq=[]
+    for a in out["actions"]:
+        key = (a["task"], a["owner"], a["due"], a["timestamp"])
+        if key not in seen:
+            seen.add(key); uniq.append(a)
+    out["actions"] = uniq
     return out
 
-def extract_actions(sentences: List[str], whisper_json_path: Optional[str]) -> List[Dict]:
-    segs = None
-    if whisper_json_path and os.path.exists(whisper_json_path):
-        with open(whisper_json_path, "r", encoding="utf-8") as f:
-            segs = json.load(f).get("segments", [])
-
-    items = []
-    for s in sentences:
-        if re.search(ACTION_VERBS, s, re.I):
-            owner = None
-            m = re.match(r"^([A-Z][a-z]+(?: [A-Z][a-z]+)?)\b[:,\- ]", s)
-            if m: owner = m.group(1)
-            due = None
-            if re.search(DUE_HINT, s, re.I):
-                mdate = re.search(DAY_HINT, s, re.I)
-                if mdate: due = mdate.group(1)
-            ts = ""
-            if segs:
-                for seg in segs:
-                    if s.strip() in seg["text"]:
-                        ts = f"{seg['start']:.1f}–{seg['end']:.1f}s"
-                        break
-            items.append({"task": s, "owner": owner or "", "due": due or "", "timestamp": ts})
-    return items
-
-def write_minutes_md(
-    path_md: str,
-    title: str,
-    summary: str,
-    key_points: List[str],
-    decisions: List[str],
-    actions: List[Dict],
-):
-    lines = [f"# {title}", "", "## Executive Summary", summary or "N/A", "", "## Key Points"]
-    if key_points:
-        lines += [f"- {kp}" for kp in key_points]
-    else:
-        lines.append("- N/A")
+def _minutes_json_to_markdown(d: dict, title: str) -> str:
+    lines = [f"# {title}", "", "## Executive Summary", d.get("summary","").strip() or "N/A", "", "## Key Points"]
+    kps = d.get("key_points") or []
+    lines += [f"- {kp.strip()}" for kp in kps] if kps else ["- N/A"]
     lines += ["", "## Decisions"]
-    if decisions:
-        lines += [f"- {d}" for d in decisions]
-    else:
-        lines.append("- N/A")
+    dec = d.get("decisions") or []
+    lines += [f"- {x.strip()}" for x in dec] if dec else ["- N/A"]
     lines += ["", "## Action Items"]
-    if actions:
-        for a in actions:
-            meta = []
-            if a["owner"]: meta.append(f"**Owner:** {a['owner']}")
-            if a["due"]:   meta.append(f"**Due:** {a['due']}")
-            if a["timestamp"]: meta.append(f"**When discussed:** {a['timestamp']}")
+    acts = d.get("actions") or []
+    if acts:
+        for a in acts:
+            meta=[]
+            if a.get("owner"): meta.append(f"**Owner:** {a['owner']}")
+            if a.get("due"):   meta.append(f"**Due:** {a['due']}")
+            if a.get("timestamp"): meta.append(f"**When discussed:** {a['timestamp']}")
             suffix = f" ({', '.join(meta)})" if meta else ""
             lines.append(f"- {a['task']}{suffix}")
     else:
         lines.append("- N/A")
-    _write(path_md, "\n".join(lines) + "\n")
-
-def write_actions_csv(path_csv: str, actions: List[Dict]):
-    if not actions:
-        return
-    os.makedirs(os.path.dirname(path_csv), exist_ok=True)
-    with open(path_csv, "w", newline="", encoding="utf-8") as f:
-        import csv
-        w = csv.DictWriter(f, fieldnames=["task","owner","due","timestamp"])
-        w.writeheader()
-        w.writerows(actions)
+    return "\n".join(lines) + "\n"
 
 def make_minutes_from_text(
     transcript_text_path: str,
-    whisper_json_path: Optional[str] = None,
     out_dir: str = "outputs",
-    summary_mode: str = "auto",
-    abstractive_model: str = "sshleifer/distilbart-cnn-12-6",
-    key_points_n: int = 8,
+    model: str = "llama3.1:8b",
+    base_url: str = "http://localhost:11434",
+    title: str = "Meeting Minutes",
 ) -> Dict[str, str]:
     if not os.path.exists(transcript_text_path):
         raise FileNotFoundError(f"Transcript not found: {transcript_text_path}")
+    os.makedirs(out_dir, exist_ok=True)
 
-    base = os.path.splitext(os.path.basename(transcript_text_path))[0]
-    run_dir = os.path.join(out_dir, f"{base}_minutes")
+    base = datetime.now().strftime("%Y%m%d_%H%M")
+    run_dir = os.path.join(out_dir, f"{base}_minutes_llm")
     os.makedirs(run_dir, exist_ok=True)
 
-    raw = _read(transcript_text_path)
-    cleaned = _clean_filler(raw)
-    sentences = _split_sentences(cleaned)
+    with open(transcript_text_path, "r", encoding="utf-8") as f:
+        full_text = f.read()
 
-    summary = None
-    if summary_mode in ("auto", "abstractive"):
-        summary = abstractive_summary(cleaned, model_name=abstractive_model)
-    if not summary and summary_mode in ("auto", "extractive"):
-        summary = extractive_summary(cleaned, sentences=10)
-    if not summary:
-        summary = " ".join(sentences[:min(8, len(sentences))])
+    chunks = _chunk_text(full_text, max_chars=12000)
+    partials = []
+    for idx, chunk in enumerate(chunks, 1):
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"Transcript chunk {idx}/{len(chunks)}:\n\n{chunk}"}
+        ]
+        content = _call_ollama(messages, model=model, base_url=base_url)
+        partials.append(_extract_json(content))
 
-    key_points = sentences[:max(3, min(key_points_n, len(sentences)))]
-    decisions = extract_decisions(sentences)
-    actions = extract_actions(sentences, whisper_json_path)
+    merged = _combine_minutes(partials)
 
-    md_path = os.path.join(run_dir, f"{base}_minutes.md")
-    csv_path = os.path.join(run_dir, f"{base}_actions.csv")
+    md_path  = os.path.join(run_dir, f"{base}_minutes.md")
+    txt_path = os.path.join(run_dir, f"{base}_minutes.txt")
 
-    title = f"Meeting Minutes – {datetime.now().strftime('%Y-%m-%d')}"
-    write_minutes_md(md_path, title, summary, key_points, decisions, actions)
-    write_actions_csv(csv_path, actions)
+    md = _minutes_json_to_markdown(merged, title=title)
+    with open(md_path,  "w", encoding="utf-8") as f: f.write(md)
+    with open(txt_path, "w", encoding="utf-8") as f:
+        # plain-text version (no markdown headers)
+        f.write(f"{title}\n\nEXECUTIVE SUMMARY\n{merged.get('summary','').strip()}\n\nKEY POINTS\n")
+        for kp in (merged.get("key_points") or []): f.write(f"- {kp.strip()}\n")
+        f.write("\nDECISIONS\n")
+        for d in (merged.get("decisions") or []): f.write(f"- {d.strip()}\n")
+        f.write("\nACTION ITEMS\n")
+        for a in (merged.get("actions") or []):
+            meta = []
+            if a.get("owner"): meta.append(f"Owner: {a['owner']}")
+            if a.get("due"):   meta.append(f"Due: {a['due']}")
+            if a.get("timestamp"): meta.append(f"When: {a['timestamp']}")
+            suffix = f" ({', '.join(meta)})" if meta else ""
+            f.write(f"- {a.get('task','').strip()}{suffix}\n")
 
-    return {"minutes_md": md_path, "actions_csv": csv_path, "dir": run_dir}
+    if merged.get("actions"):
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=["task","owner","due","timestamp"])
+            w.writeheader()
+            for a in merged["actions"]:
+                w.writerow(a)
+    else:
+        csv_path = ""
+
+    return {"minutes_md": md_path, "minutes_txt": txt_path, "actions_csv": csv_path, "dir": run_dir}
+
+# CLI for quick tests
+def _parse_args():
+    ap = argparse.ArgumentParser(description="LLM-only minutes (Ollama)")
+    ap.add_argument("transcript_txt", help="Path to transcript .txt or conversation .md")
+    ap.add_argument("--out_dir", default="outputs")
+    ap.add_argument("--model", default="llama3.1:8b")
+    ap.add_argument("--base_url", default="http://localhost:11434")
+    ap.add_argument("--title", default="Meeting Minutes")
+    return ap.parse_args()
+
+if __name__ == "__main__":
+    args = _parse_args()
+    try:
+        r = make_minutes_from_text(
+            transcript_text_path=args.transcript_txt,
+            out_dir=args.out_dir,
+            model=args.model,
+            base_url=args.base_url,
+            title=args.title,
+        )
+        print("✅ Minutes MD:", r["minutes_md"])
+        print("✅ Minutes TXT:", r["minutes_txt"])
+        if r["actions_csv"]:
+            print("✅ Actions CSV:", r["actions_csv"])
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
