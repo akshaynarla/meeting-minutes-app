@@ -3,8 +3,7 @@
 # to-do: remove bloaty code and reduce unnecessary code.
 
 from __future__ import annotations
-import os, re, json, csv, argparse, sys
-from typing import Dict, List
+import os, json, argparse, sys
 import requests
 from datetime import datetime
 
@@ -29,182 +28,98 @@ Schema:
   "actions": [{"task":"string","owner":"string","due":"string","timestamp":"string"}, ...]
 }
 """
-
-def _chunk_text(text: str, max_chars: int = 12000) -> List[str]:
-    if len(text) <= max_chars:
-        return [text]
-    parts, i = [], 0
-    while i < len(text):
-        chunk = text[i:i+max_chars]
-        last = max(chunk.rfind(". "), chunk.rfind("? "), chunk.rfind("! "), chunk.rfind("\n"))
-        if last > 1000:
-            chunk = chunk[:last+1]
-        parts.append(chunk)
-        i += len(chunk)
-    return parts
-
-def _call_ollama(messages: List[Dict[str, str]], model: str, base_url: str) -> str:
-    payload = {"model": model, "messages": messages, "stream": False}
-    r = requests.post(f"{base_url.rstrip('/')}/api/chat", json=payload, timeout=1800)
+# Ollama API call. Posts the API request to ollama chat.
+def _ollama_chat(base_url: str, model: str, system: str, user: str) -> str:
+    r = requests.post(
+        f"{base_url.rstrip('/')}/api/chat",
+        json={"model": model, 
+              "messages":[{"role":"system","content":system},
+                          {"role":"user","content":user}], 
+              "stream": False},
+        timeout=1800
+    )
     r.raise_for_status()
-    data = r.json()
-    return data["message"]["content"]
+    return r.json()["message"]["content"]
 
-def _extract_json(text: str) -> dict:
-    s = text.strip()
-    s = re.sub(r"^```(json)?\s*|\s*```$", "", s, flags=re.I | re.M).strip()
+# clean the LLM output to extract structured data as per the schema
+def _parse_json(s: str) -> dict:
+    s = s.strip()
+    if s.startswith("```"):
+        s = s.strip("`")
+        s = s.split("\n",1)[-1].rsplit("\n",1)[0]
     try:
         return json.loads(s)
     except Exception:
-        pass
-    m = re.search(r"\{.*\}", s, flags=re.S)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except Exception:
-            pass
-    # last resort fallback
-    return {"summary": s[:1000], "key_points": [], "decisions": [], "actions": []}
+        import re
+        m = re.search(r"\{.*\}", s, flags=re.S)
+        if m:
+            try: return json.loads(m.group(0))
+            except: pass
+    return {"summary": s[:800], "key_points": [], "decisions": [], "actions": []}
 
-def _combine_minutes(parts: List[dict]) -> dict:
-    out = {"summary": "", "key_points": [], "decisions": [], "actions": []}
-    for p in parts:
-        if not isinstance(p, dict): 
-            continue
-        if p.get("summary"):
-            out["summary"] += (" " if out["summary"] else "") + str(p["summary"]).strip()
-        out["key_points"].extend([x for x in (p.get("key_points") or []) if isinstance(x, str)])
-        out["decisions"].extend([x for x in (p.get("decisions") or []) if isinstance(x, str)])
-        for a in p.get("actions") or []:
-            if isinstance(a, dict) and a.get("task"):
-                out["actions"].append({
-                    "task": str(a.get("task","")).strip(),
-                    "owner": str(a.get("owner","")).strip(),
-                    "due": str(a.get("due","")).strip(),
-                    "timestamp": str(a.get("timestamp","")).strip(),
-                })
-    def _dedupe(seq):
-        seen, res = set(), []
-        for x in seq:
-            if x not in seen:
-                seen.add(x); res.append(x)
-        return res
-    out["key_points"] = _dedupe(out["key_points"])[:10]
-    out["decisions"] = _dedupe(out["decisions"])
-    seen = set(); uniq=[]
-    for a in out["actions"]:
-        key = (a["task"], a["owner"], a["due"], a["timestamp"])
-        if key not in seen:
-            seen.add(key); uniq.append(a)
-    out["actions"] = uniq
-    return out
-
-def _minutes_json_to_markdown(d: dict, title: str) -> str:
-    lines = [f"# {title}", "", "## Executive Summary", d.get("summary","").strip() or "N/A", "", "## Key Points"]
+# Convert LLM output to markdown (JSON to md converter)
+def _to_markdown(d: dict, title: str) -> str:
+    md = [f"# {title}", "",
+          "## Executive Summary", (d.get("summary") or "N/A").strip(), "",
+          "## Key Points"]
     kps = d.get("key_points") or []
-    lines += [f"- {kp.strip()}" for kp in kps] if kps else ["- N/A"]
-    lines += ["", "## Decisions"]
+    md += [f"- {x.strip()}" for x in kps] if kps else ["- N/A"]
+    md += ["", "## Decisions"]
     dec = d.get("decisions") or []
-    lines += [f"- {x.strip()}" for x in dec] if dec else ["- N/A"]
-    lines += ["", "## Action Items"]
+    md += [f"- {x.strip()}" for x in dec] if dec else ["- N/A"]
+    md += ["", "## Action Items"]
     acts = d.get("actions") or []
     if acts:
         for a in acts:
-            meta=[]
-            if a.get("owner"): meta.append(f"**Owner:** {a['owner']}")
-            if a.get("due"):   meta.append(f"**Due:** {a['due']}")
-            if a.get("timestamp"): meta.append(f"**When discussed:** {a['timestamp']}")
-            suffix = f" ({', '.join(meta)})" if meta else ""
-            lines.append(f"- {a['task']}{suffix}")
+            task = (a.get("task") or "").strip()
+            owner = a.get("owner") or ""
+            due = a.get("due") or ""
+            ts = a.get("timestamp") or ""
+            temp = []
+            if owner: temp.append(f"**Owner:** {owner}")
+            if due:   temp.append(f"**Due:** {due}")
+            if ts:    temp.append(f"**When discussed:** {ts}")
+            md.append(f"- {task}" + (f" ({', '.join(temp)})" if temp else ""))
     else:
-        lines.append("- N/A")
-    return "\n".join(lines) + "\n"
+        md.append("- N/A")
+    return "\n".join(md) + "\n"
 
-def make_minutes_from_text(
-    transcript_text_path: str,
-    out_dir: str = "outputs",
-    model: str = "llama3.1:8b",
-    base_url: str = "http://localhost:11434",
-    title: str = "Meeting Minutes",
-) -> Dict[str, str]:
+# LLM meeting minutes generator from transcript text file
+def make_minutes_from_text(transcript_text_path: str,
+                           out_dir: str = "outputs",
+                           model: str = "llama3.1:8b",
+                           base_url: str = "http://localhost:11434",
+                           title: str = "Meeting Minutes") -> dict:
     if not os.path.exists(transcript_text_path):
-        raise FileNotFoundError(f"Transcript not found: {transcript_text_path}")
+        raise FileNotFoundError(transcript_text_path)
     os.makedirs(out_dir, exist_ok=True)
-
+    # create output directory
     base = datetime.now().strftime("%Y%m%d_%H%M")
-    run_dir = os.path.join(out_dir, f"{base}_minutes_llm")
-    os.makedirs(run_dir, exist_ok=True)
+    run_dir = os.path.join(out_dir, f"{base}_minutes_llm"); os.makedirs(run_dir, exist_ok=True)
 
-    with open(transcript_text_path, "r", encoding="utf-8") as f:
-        full_text = f.read()
-
-    chunks = _chunk_text(full_text, max_chars=12000)
-    partials = []
-    for idx, chunk in enumerate(chunks, 1):
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Transcript chunk {idx}/{len(chunks)}:\n\n{chunk}"}
-        ]
-        content = _call_ollama(messages, model=model, base_url=base_url)
-        partials.append(_extract_json(content))
-
-    merged = _combine_minutes(partials)
+    with open(transcript_text_path, "r", encoding="utf-8", errors="ignore") as f:
+        transcript = f.read()
+    # prompt the LLM Chat API
+    content = _ollama_chat(base_url, model, SYSTEM_PROMPT, "Transcript:\n\n" + transcript)
+    data = _parse_json(content)
 
     md_path  = os.path.join(run_dir, f"{base}_minutes.md")
-    txt_path = os.path.join(run_dir, f"{base}_minutes.txt")
 
-    md = _minutes_json_to_markdown(merged, title=title)
-    with open(md_path,  "w", encoding="utf-8") as f: f.write(md)
-    with open(txt_path, "w", encoding="utf-8") as f:
-        # plain-text version (no markdown headers)
-        f.write(f"{title}\n\nEXECUTIVE SUMMARY\n{merged.get('summary','').strip()}\n\nKEY POINTS\n")
-        for kp in (merged.get("key_points") or []): f.write(f"- {kp.strip()}\n")
-        f.write("\nDECISIONS\n")
-        for d in (merged.get("decisions") or []): f.write(f"- {d.strip()}\n")
-        f.write("\nACTION ITEMS\n")
-        for a in (merged.get("actions") or []):
-            meta = []
-            if a.get("owner"): meta.append(f"Owner: {a['owner']}")
-            if a.get("due"):   meta.append(f"Due: {a['due']}")
-            if a.get("timestamp"): meta.append(f"When: {a['timestamp']}")
-            suffix = f" ({', '.join(meta)})" if meta else ""
-            f.write(f"- {a.get('task','').strip()}{suffix}\n")
+    md = _to_markdown(data, title)
+    with open(md_path, "w", encoding="utf-8") as f: f.write(md)
+    return {"minutes_md": md_path, "dir": run_dir}
 
-    if merged.get("actions"):
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=["task","owner","due","timestamp"])
-            w.writeheader()
-            for a in merged["actions"]:
-                w.writerow(a)
-    else:
-        csv_path = ""
-
-    return {"minutes_md": md_path, "minutes_txt": txt_path, "actions_csv": csv_path, "dir": run_dir}
-
-# CLI for quick tests
-def _parse_args():
-    ap = argparse.ArgumentParser(description="LLM-only minutes (Ollama)")
-    ap.add_argument("transcript_txt", help="Path to transcript .txt or conversation .md")
+# CLI
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("transcript_txt")
     ap.add_argument("--out_dir", default="outputs")
     ap.add_argument("--model", default="llama3.1:8b")
     ap.add_argument("--base_url", default="http://localhost:11434")
     ap.add_argument("--title", default="Meeting Minutes")
-    return ap.parse_args()
-
-if __name__ == "__main__":
-    args = _parse_args()
+    a = ap.parse_args()
     try:
-        r = make_minutes_from_text(
-            transcript_text_path=args.transcript_txt,
-            out_dir=args.out_dir,
-            model=args.model,
-            base_url=args.base_url,
-            title=args.title,
-        )
-        print("✅ Minutes MD:", r["minutes_md"])
-        print("✅ Minutes TXT:", r["minutes_txt"])
-        if r["actions_csv"]:
-            print("✅ Actions CSV:", r["actions_csv"])
+        res = make_minutes_from_text(a.transcript_txt, a.out_dir, a.model, a.base_url, a.title)
+        print("MD:", res["minutes_md"])
     except Exception as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
+        print("ERROR:", e, file=sys.stderr); sys.exit(1)

@@ -102,12 +102,11 @@ def main():
     m = make_minutes_from_text(
         transcript_text_path=source_txt_for_minutes,
         out_dir=args.out,
-        model="llama3.1:8b",          # or mistral:7b-instruct, phi3:3.8b
+        model="llama3.1:8b",          # to-do: add more models. Now gemma3.1:1b can work too
         base_url="http://localhost:11434",
         title="Meeting Minutes",
     )
     print("Minutes:", m["minutes_md"])
-    print("Minutes (TXT):", m["minutes_txt"])
 
 if __name__ == "__main__":
     main()

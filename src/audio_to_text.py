@@ -5,11 +5,6 @@ from typing import Optional, Dict
 import whisper
 from whisper.utils import get_writer
 
-# check if the directory exists, if not create it
-def _ensure_dir(p: str) -> str:
-    os.makedirs(p, exist_ok=True)
-    return p
-
 def transcribe_whisper(
     audio_path: str,
     model_size: str = "base",
@@ -24,9 +19,8 @@ def transcribe_whisper(
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Audio not found: {audio_path}")
 
-    _ensure_dir(output_dir)
     base = datetime.now().strftime("%Y%m%d_%H%M")
-    run_dir = _ensure_dir(os.path.join(output_dir, f"{base}_transcript"))
+    run_dir = os.path.join(output_dir, f"{base}_transcript"); os.makedirs(output_dir, exist_ok=True)
 
     model = whisper.load_model(model_size)
     result = model.transcribe(

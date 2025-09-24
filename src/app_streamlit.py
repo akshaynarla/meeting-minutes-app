@@ -8,6 +8,7 @@ from conversation_maker import (
     apply_speaker_map, write_conversation_markdown
 )
 from text_to_meetmins import make_minutes_from_text
+from whisperx_convo import transcribe_to_conversation
 
 LOGO = "resources/ias.jpg"
 LOGO_LINK = "https://www.ias.uni-stuttgart.de"
@@ -87,10 +88,6 @@ if load_transcript_btn:
     st.session_state.conversation_path = None  # reset if user switches sources
 
     st.success(f"Loaded transcript: {uploaded_transcript.name}")
-    with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
-        preview = f.read(1200)
-    st.code(preview + ("..." if len(preview) == 1200 else ""), language="markdown")
-
     st.stop() 
 
 # Upon click of the button, execute:
@@ -114,11 +111,6 @@ if run_transcribe:
         )
         s.update(label="Transcription complete ✅", state="complete")
 
-    # Preview transcript head
-    with open(st.session_state.transcript["text"], "r", encoding="utf-8") as f:
-        preview = f.read(1200)
-    st.code(preview + ("..." if len(preview) == 1200 else ""), language="markdown")
-
     # Downloads
     st.download_button("Download transcript (.txt)",
         file_name=os.path.basename(st.session_state.transcript["text"]),
@@ -128,11 +120,48 @@ if run_transcribe:
         data=open(st.session_state.transcript["srt"], "rb").read())
     
 st.markdown("---")
+
+st.markdown("### 1b) Or use WhisperX (Transcribe + Speakers in one go)")
+run_whisperx = st.button("Run WhisperX (ASR + Diarization)")
+
+if run_whisperx:
+    if not audio_file:
+        st.error("Please upload an audio/video file.")
+        st.stop()
+    if not hf_token:
+        st.error("Hugging Face READ token required for WhisperX diarization.")
+        st.stop()
+
+    # save upload to temp
+    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(audio_file.name)[1]) as tmp:
+        tmp.write(audio_file.getbuffer())
+        tmp_path = tmp.name
+
+    with st.status("Running WhisperX (ASR + alignment + diarization)…", expanded=True) as s:
+        res = transcribe_to_conversation(
+            audio_path=tmp_path,
+            out_dir=out_dir,
+            model_size="base",     # good default for CPU; change to "small"/"medium" if needed
+            device="cpu",          # or "cuda" if you have a GPU
+            compute_type=None,     # auto: int8 on CPU, float16 on CUDA
+            hf_token=hf_token,
+            timestamps=True,
+        )
+        # Fill session like the rest of your app expects
+        st.session_state.transcript = {"text": res["text"], "json": res["json"], "dir": res["dir"]}
+        st.session_state.conversation_path = res["conversation"]
+        st.session_state.merged_segments = None  # clear any earlier state
+        s.update(label="WhisperX complete ✅", state="complete")
+
+    st.download_button("Download conversation (.md)",
+        file_name=os.path.basename(st.session_state.conversation_path),
+        data=open(st.session_state.conversation_path, "rb").read())
+
 st.subheader("2) Conversation (Speaker-labeled)")
 
 c1, c2 = st.columns([1,1])
 with c1:
-    run_diar_btn = st.button("Run Diarization + Build Conversation", disabled=not do_diar)
+    run_diar_btn = st.button("Run Speaker Identification + Build Conversation", disabled=not do_diar)
 with c2:
     if not do_diar:
         st.info("Turn on **Enable diarization** in the sidebar to use this step.")
@@ -186,12 +215,6 @@ if st.session_state.merged_segments:
         st.session_state.conversation_path = conv_path
         st.session_state.speaker_mapping = new_map
         st.success(f"Saved conversation → {conv_path}")
-
-        # Preview
-        with open(conv_path, "r", encoding="utf-8") as f:
-            head = "".join([next(f) for _ in range(30)])
-        st.code(head, language="markdown")
-
         st.download_button("Download conversation (.md)",
             file_name=os.path.basename(conv_path),
             data=open(conv_path, "rb").read())
@@ -220,11 +243,6 @@ if run_minutes:
             title="Meeting Minutes",
         )
         s.update(label="Minutes ready ✅", state="complete")
-
-    # Preview & downloads
-    with open(res["minutes_md"], "r", encoding="utf-8") as f:
-        preview = "".join([next(f) for _ in range(40)])
-    st.code(preview, language="markdown")
 
     st.download_button("Download Minutes (.md)",
         file_name=os.path.basename(res["minutes_md"]),
