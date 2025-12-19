@@ -44,13 +44,12 @@ def generate_minutes(
     with open(transcript_path, "r", encoding="utf-8") as f:
         transcript_text = f.read()
 
+    print(f"Transcript length: {len(transcript_text)} chars")
     if len(transcript_text) > 50000:
         transcript_text = transcript_text[:50000] + "...[TRUNCATED]"
 
-    # Chunking
-    CHUNK_SIZE = 4000          # characters per chunk
-    CHUNK_NUM_PREDICT = 256    # how long each chunk summary can be
-    FINAL_NUM_PREDICT = 512    # how long the final JSON answer can be
+    CHUNK_SIZE = 4000
+    CHUNK_NUM_PREDICT = 256
 
     if len(transcript_text) > CHUNK_SIZE:
         chunks = [
@@ -60,6 +59,8 @@ def generate_minutes(
 
         chunk_summaries = []
         for idx, chunk in enumerate(chunks, start=1):
+            print(f"Processing chunk {idx}/{len(chunks)}...")
+            
             chunk_messages = [
                 {
                     "role": "system",
@@ -82,39 +83,60 @@ def generate_minutes(
             chunk_payload = {
                 "model": model,
                 "messages": chunk_messages,
-                "stream": False,
+                "stream": True,  # FIXED
                 "options": {
                     "temperature": 0.2,
                     "num_predict": CHUNK_NUM_PREDICT,
                 },
             }
 
-            resp = requests.post(
+            chunk_text = ""
+            with requests.post(
                 f"{base_url.rstrip('/')}/api/chat",
                 json=chunk_payload,
                 timeout=600,
-            )
-            resp.raise_for_status()
-            chunk_text = resp.json()["message"]["content"].strip()
-            chunk_summaries.append(chunk_text)
+                stream=True
+            ) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if line:
+                        data = json.loads(line)
+                        token = data.get("message", {}).get("content", "")
+                        chunk_text += token
+            
+            chunk_summaries.append(chunk_text.strip())
 
-        # Replace long raw transcript with combined chunk summaries
         transcript_text = "\n\n".join(chunk_summaries)
-    # ---------- END CHUNKING SECTION ----------
 
+    print("Generating final minutes...")
+    
     payload = {
         "model": model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": f"Here is the transcript:\n\n{transcript_text}"}
         ],
-        "stream": False,
+        "stream": True,  # FIXED
         "options": {"temperature": 0.2}
     }
 
-    resp = requests.post(f"{base_url.rstrip('/')}/api/chat", json=payload, timeout=600)
-    resp.raise_for_status()
-    content = resp.json()["message"]["content"]
+    content = ""
+    with requests.post(
+        f"{base_url.rstrip('/')}/api/chat",
+        json=payload,
+        timeout=600,
+        stream=True
+    ) as resp:
+        resp.raise_for_status()
+        for line in resp.iter_lines():
+            if line:
+                data = json.loads(line)
+                token = data.get("message", {}).get("content", "")
+                content += token
+                print(token, end="", flush=True)
+    
+    print()
+    
     data = _repair_json(content)
 
     md = [f"# {title}", "", f"**Date:** {datetime.now().strftime('%Y-%m-%d')}", ""]

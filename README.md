@@ -1,126 +1,242 @@
-# Meeting Assistant
+# 🎙️ Offline Meeting Minutes
 
-Turn raw meeting audio into clean transcript, speaker-labeled conversations, and LLM-generated minutes all locally on your machine.
+A fully offline meeting transcription and summarization app using Whisper + Ollama.
 
-* **Transcript:** CPU Whisper transcription (or skip if you already have a transcript)
-* **Speaker Identification:** One-click **WhisperX** (transcribe and identify speakers)
-* **Meeting Minutes:** Summarize to Markdown using a **local Ollama** model
+**Features:**
+- 🎤 Transcribe audio/video files to text
+- 👥 Speaker identification (diarization)
+- 📝 AI-generated meeting minutes with action items
+- 🎧 Live transcription from microphone (CLI)
 
-## Features
+---
 
-* Runs entirely local (aimed at CPU-only; GPU would be greeeaaatttt!!)
-* Upload audio/video (.mp3, .wav, .m4a, .mp4, .mov)
-* Whisper transcription to .txt and .srt
-* WhisperX optional: word-level timestamps + speaker labels
-* Ollama LLM minutes: Markdown + plain text
-* Works with existing transcripts (.txt/.md)
-* 3-page Streamlit UX with download files
+## 📦 Installation
 
-## App structure
+### 1. Python Dependencies
 
+```bash
+pip install streamlit faster-whisper whisperx torch requests
+pip install sounddevice  # For live transcription
+```
 
-?? app\_streamlit.py # main entry û navigation + global state
-?? app\_streamlit\_page1.py # Transcript page (Whisper)
-?? app\_streamlit\_page2.py # Speaker Identification (WhisperX)
-?? app\_streamlit\_page3.py # Meeting Minutes (Ollama)
-?? audio\_to\_text.py # transcribe\_whisper(...)
-?? whisperx\_conv.py # transcribe\_to\_conversation(...) via WhisperX
-?? text\_to\_meetmins.py # make\_minutes\_from\_text(...) via Ollama (JSON?MD)
-?? resources/
- ?? ias.jpg # example logo (optional)
+### 2. Ollama (Local LLM)
 
-If you still have conversation\_maker.py (pyannote overlap approach), it is optional as WhisperX can handle diarization also alogn with transcribing in one pass.
+**Install Ollama:**
+- **Windows:** Download from https://ollama.com/download
+- **Mac:** `brew install ollama`
+- **Linux:** `curl -fsSL https://ollama.com/install.sh | sh`
 
-## Quick start
+**Download a model:**
+```bash
+# Recommended for CPU (fast + good quality)
+ollama pull qwen3:1.7b
 
-### 1. Create environment & install deps
+# Alternative options
+ollama pull phi3:mini      # Fastest
+ollama pull qwen3:4b       # Better quality (needs more RAM/time)
+```
 
-**Python 3.10+** recommended.
+### 3. (Optional) Speaker Identification
 
-# CPU PyTorch first (official index)
-pip install -r requirments.txt
+Requires a HuggingFace token:
+1. Create account at https://huggingface.co
+2. Go to Settings → Access Tokens
+3. Create a token with `read` access
+4. Accept the model agreements:
+   - https://huggingface.co/pyannote/speaker-diarization
+   - https://huggingface.co/pyannote/segmentation
 
-Pull at least one local model:
+---
 
-ollama pull llama3.1:8b # balanced default
-# or a lighter one:
-# ollama pull phi3:3.8b
+## 🚀 Usage
 
-**WhisperX diarization (optional)** - Accept the **pyannote** diarization model terms on Hugging Face and set a read token:
+### Start Ollama
 
-## Run the app
+```bash
+ollama serve
+```
 
-streamlit run app\_streamlit.py
+### Run the App
 
-### Page 1: Transcript
+```bash
+cd src
+streamlit run app.py
+```
 
-1. Upload audio/video
-2. Pick model (start with base on CPU)
-3. **Run Transcription** to get downloads: \*.txt, \*.srt
-Tip: If you already have a transcript, you can skip this and load it on **Page 3**.
+Open http://localhost:8501 in your browser.
 
-### Page 2: Speaker Identification (WhisperX)
+---
 
-1. Ensure HF\_TOKEN is set (or paste in sidebar)
-2. **Run WhisperX**: Creates conversation.md (speaker-tagged) + raw \*.json
+## 📖 How to Use
 
-### Page 3: Meeting Minutes (Ollama)
+### Tab 1: Transcribe Audio
 
-1. If conversation.md exists, itÆs used automatically; else falls back to transcript .txt
-   (You can also **upload** a .txt/.md here and click **Load Uploaded Transcript**.)
-2. Choose **Ollama model** (e.g., llama3.1:8b)
-3. **Generate Minutes**
-   ? Downloads: \*\_minutes.md, \*\_minutes.txt
-   *(If your minutes code exports action items, you may also get \*\_actions.csv.)*
+1. Upload an audio/video file (mp3, wav, m4a, mp4)
+2. Select Whisper model size:
+   - `tiny`/`base` — Fast, good for clear audio
+   - `small`/`medium` — Better accuracy
+   - `large-v3` — Best quality (slow on CPU)
+3. (Optional) Enable speaker identification
+4. Click **Start Processing**
 
-## ? CLI (optional)
+### Tab 2: Generate Minutes
 
-Generate minutes directly from a transcript or conversation:
+1. Process audio in Tab 1, OR upload a transcript file
+2. Select your Ollama model (recommend `qwen3:1.7b` for CPU)
+3. Click **Generate Minutes**
+4. Download the markdown file
 
-python text\_to\_meetmins.py outputs/<run>\_transcript/conversation.md \
- --out\_dir outputs \
- --model "llama3.1:8b" \
- --base\_url "http://localhost:11434"
+### Tab 3: Live Transcription
 
-## ? Outputs
+The Streamlit UI shows initialization only. For actual live transcription, use the CLI:
 
-For input meeting.mp3 with out\_dir=outputs:
+```bash
+cd src
+python live_cli.py
+```
 
-outputs/
-?? meeting\_transcript/
-? ?? meeting.txt
-? ?? meeting.json
-? ?? meeting.srt
-? ?? meeting.vtt (if enabled)
-?? meeting\_whisperx/
-? ?? meeting.txt
-? ?? meeting.json
-? ?? conversation.md
-?? meeting\_minutes\_llm/
- ?? meeting\_minutes.md
- ?? meeting\_minutes.txt
+Speak into your microphone. Press `Ctrl+C` to stop.
 
-## ? Performance tips (CPU)
+---
 
-* Set **Language code** on Page 1 to skip auto-detect.
-* Prefer **Transcribe** (not **Translate**) unless you need English ? faster.
-* Keep Whisper at **base** (or **small**) for a good quality/time balance.
-* WhisperX adds alignment/diarization time; run it only when you need speakers.
-* Later optimization: swap to **faster-whisper (CTranslate2, int8)** for 2û4Î speedups while still staying ôWhisperö.
+## ⚙️ Configuration
 
-## Privacy
+### Whisper Models
 
-Everything runs **locally**: - Whisper/WhisperX models are downloaded once and cached on your machine. - Minutes are produced by **local Ollama** models. - No audio or transcripts leave your environment.
+| Model | Speed | Accuracy | RAM |
+|-------|-------|----------|-----|
+| tiny | ⚡⚡⚡⚡ | ★★ | ~1GB |
+| base | ⚡⚡⚡ | ★★★ | ~1GB |
+| small | ⚡⚡ | ★★★★ | ~2GB |
+| medium | ⚡ | ★★★★ | ~5GB |
+| large-v3 | 🐢 | ★★★★★ | ~10GB |
 
-## Roadmap
+### Ollama Models
 
-[] Progress bars for long CPU jobs
-[] Optional faster-whisper backend
-[] Speaker name mapping UI on Page 2
+| Model | Speed (CPU) | Quality | RAM |
+|-------|------------|---------|-----|
+| phi3:mini | ⚡⚡⚡⚡ | ★★★ | ~2GB |
+| qwen3:1.7b | ⚡⚡⚡ | ★★★★ | ~3GB |
+| qwen3:4b | ⚡⚡ | ★★★★ | ~6GB |
+| llama3.1:8b | ⚡ | ★★★★★ | ~10GB |
 
-## License & credits
+**Recommendation:** Use `qwen3:1.7b` for CPU inference.
 
-* **Transcription:** OpenAI Whisper ()
-* **Alignment & Diarization:** WhisperX (+ pyannote)
-* **Minutes:** Ollama local LLMs
-* **UI:** Streamlit
+---
+
+## 📁 Project Structure
+
+```
+src/
+├── app.py                 # Streamlit app
+├── live_cli.py            # CLI live transcription
+└── backend/
+    ├── __init__.py
+    ├── backend_whisper.py # Audio transcription
+    ├── backend_llm.py     # Meeting minutes generation
+    └── live_transcript.py # Live transcription backend
+
+outputs/                   # Generated files saved here
+temp_uploads/              # Temporary upload directory
+```
+
+---
+
+## 🔧 Troubleshooting
+
+### "Connection refused" to Ollama
+```bash
+# Make sure Ollama is running
+ollama serve
+```
+
+### Meeting minutes taking too long
+- Switch to a smaller model: `qwen3:1.7b` or `phi3:mini`
+- Check if streaming is enabled in `backend_llm.py` (`"stream": True`)
+
+### "No module named sounddevice"
+```bash
+pip install sounddevice
+
+# Linux may also need:
+sudo apt-get install libportaudio2
+```
+
+### Out of memory
+- Use smaller Whisper model (`tiny` or `base`)
+- Use smaller Ollama model (`qwen3:1.7b`)
+- Close other applications
+
+### Poor transcription quality
+- Use larger Whisper model (`small` or `medium`)
+- Ensure audio is clear with minimal background noise
+- Check audio sample rate (16kHz is optimal)
+
+---
+
+## 🛠️ Technical Notes
+
+### Why Streaming Matters
+
+The LLM backend uses streaming (`"stream": True`) to avoid UI freezing:
+
+```python
+# Without streaming: UI freezes for 60+ seconds
+resp = requests.post(url, json={"stream": False})
+
+# With streaming: See progress in real-time
+with requests.post(url, json={"stream": True}, stream=True) as resp:
+    for line in resp.iter_lines():
+        # Process tokens as they arrive
+```
+
+### API Endpoints
+
+Ollama runs at `http://localhost:11434`:
+- `POST /api/chat` — Chat completion
+- `GET /api/tags` — List models
+- `POST /api/generate` — Text generation
+
+---
+
+## 📄 Output Format
+
+Generated meeting minutes include:
+
+```markdown
+# Meeting Minutes
+
+**Date:** 2025-01-15
+
+## 📝 Executive Summary
+Brief overview of the meeting...
+
+## 🔑 Key Points
+- Point 1
+- Point 2
+
+## 🤝 Decisions Made
+- Decision 1
+- Decision 2
+
+## ✅ Action Items
+| Task | Owner | Due |
+|------|-------|-----|
+| Complete report | Alice | Friday |
+```
+
+---
+
+## 📜 License
+
+MIT License - Use freely for personal and commercial projects.
+
+---
+
+## 🙏 Acknowledgments
+
+- [Whisper](https://github.com/openai/whisper) — OpenAI's speech recognition
+- [faster-whisper](https://github.com/guillaumekln/faster-whisper) — Optimized Whisper
+- [WhisperX](https://github.com/m-bain/whisperX) — Word-level timestamps + diarization
+- [Ollama](https://ollama.com) — Local LLM inference
+- [Silero VAD](https://github.com/snakers4/silero-vad) — Voice activity detection

@@ -1,4 +1,5 @@
 .mp3
+temp_uploads
 
 # Byte-compiled / cache
 __pycache__/

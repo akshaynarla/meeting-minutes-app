@@ -21,7 +21,7 @@ with st.sidebar:
     hf_token = st.text_input("Hugging Face Token", type="password", help="Required for Speaker ID")
 
     st.markdown("### LLM (Ollama)")
-    ollama_model = st.selectbox("Model Name", ["qwen3:4b", "llama3.1:8b"], index=0)
+    ollama_model = st.selectbox("Model Name", ["qwen3:1.7b", "qwen3:4b", "llama3.1:8b"], index=0)
     ollama_url = st.text_input("Base URL", value="http://localhost:11434")
 
 tab1, tab2, tab3 = st.tabs(["🎙️ Process Audio", "📝 Generate Minutes", "🎧 Live"])
