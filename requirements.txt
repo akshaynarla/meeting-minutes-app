@@ -1,0 +1,9 @@
+streamlit
+whisperx
+torch
+requests
+faster-whisper
+numpy
+scipy
+sounddevice
+silero-vad
