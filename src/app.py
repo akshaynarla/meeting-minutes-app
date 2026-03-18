@@ -1,9 +1,23 @@
 import os
+import requests
 # necessary for solving some PyTorch library issues. Possibly (https://github.com/pytorch/pytorch/issues/44282)
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import streamlit as st
 from backend import process_audio, generate_minutes, LiveTranscriber
+
+def get_ollama_models(base_url="http://localhost:11434"):
+    try:
+        resp = requests.get(f"{base_url.rstrip('/')}/api/tags", timeout=1)
+        if resp.status_code == 200:
+            models = resp.json().get("models", [])
+            names = [m["name"] for m in models]
+            if names:
+                return names
+    except Exception:
+        pass
+    # Fallback models, emphasizing CPU-friendly ones for users without GPU
+    return ["qwen2.5:1.5b", "phi3:mini", "llama3.1:8b", "qwen3:4b"]
 
 st.set_page_config(page_title="Meeting Assistant", page_icon="🎙️", layout="wide")
 
@@ -29,10 +43,17 @@ with st.sidebar:
     # because it uses PyAnnote Speaker Diarization by default -- which is available from the HuggingFace Hub
 
     # To use Ollama, you'd need to download Ollama locally first.
-    # The listed models can be downloaded or
-    st.markdown("### LLM (Ollama)")
-    ollama_model = st.selectbox("Model Name", ["qwen3:1.7b", "qwen3:4b", "llama3.1:8b"], index=0)
-    ollama_url = st.text_input("Base URL", value="http://localhost:11434")
+    st.markdown("### LLM (Ollama or HF API)")
+    ollama_url = st.text_input("Base URL", value="http://localhost:11434", help="Local Ollama, or Hugging Face Inference API (e.g. https://api-inference.huggingface.co/models/meta-llama/Meta-Llama-3-8B-Instruct)")
+    
+    available_models = get_ollama_models(ollama_url)
+    ollama_model = st.selectbox(
+        "Model Name", 
+        available_models, 
+        index=0,
+        help="If GPU available, larger models work well. For CPU, try lighter models like phi3:mini or qwen2.5:1.5b."
+    )
+    
     allow_remote_ollama = st.checkbox(
         "Allow non-local Ollama endpoint",
         value=False,
@@ -120,7 +141,7 @@ with tab2:
                 else:
                     os.environ.pop("OLLAMA_ALLOW_REMOTE", None)
 
-                minutes_path = generate_minutes(transcript_source, model=ollama_model, base_url=ollama_url)
+                minutes_path = generate_minutes(transcript_source, model=ollama_model, base_url=ollama_url, hf_token=hf_token)
                 with open(minutes_path, "r", encoding="utf-8") as f:
                     md_content = f.read()
                 st.markdown(md_content)

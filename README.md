@@ -29,7 +29,7 @@ export OLLAMA_ALLOW_REMOTE=1
 ### 1) Python dependencies
 
 ```bash
-pip install streamlit whisperx torch requests faster-whisper numpy scipy sounddevice
+pip install streamlit whisperx torch requests faster-whisper numpy scipy sounddevice faiss-cpu sentence-transformers
 ```
 
 Notes:

@@ -9,84 +9,36 @@ from typing import Dict, Any, List, Tuple, Optional
 from urllib.parse import urlparse
 
 import requests
+from .backend_rag import DocumentRAG, RAG_AVAILABLE
 
 _CONVERSATION_LINE_RE = re.compile(r"^\*\*(.+?)\*\*\s*\[(\d\d:\d\d:\d\d)\]:\s*(.*)$")
 
 SYSTEM_PROMPT = """You are a professional meeting minute-taker.
+Write the meeting minutes in CLEAR, formatted Markdown.
 
-Return a VALID JSON object ONLY (no markdown fences, no preamble).
-Your JSON MUST match the provided schema.
+Required Output Structure:
+## 📝 Executive Summary
+[Brief 5-8 sentence summary here]
+
+## 🔑 Key Points
+- [Key point 1]
+- [Key point 2]
+
+## 🤝 Decisions Made
+- [Decision 1]
+- [Decision 2]
+
+## ✅ Action Items
+| Task | Owner | Due |
+|---|---|---|
+| [Task] | [Owner] | [Date] |
 
 Guidelines:
 - Be factual and concise.
-- Prefer specific, actionable items.
-- If something is unknown, use "TBD".
+- Use ONLY the provided context. If unknown, use "TBD".
+- If a section has no content, put "- (None)".
+- Return exactly the Markdown structure above. Do not surround it with ```markdown blocks.
 """
-
-
-MINUTES_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "summary": {"type": "string", "description": "Executive summary (5-8 sentences)."},
-        "key_points": {"type": "array", "items": {"type": "string"}},
-        "decisions": {"type": "array", "items": {"type": "string"}},
-        "action_items": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "task": {"type": "string"},
-                    "owner": {"type": "string"},
-                    "due_date": {"type": "string"},
-                },
-                "required": ["task", "owner", "due_date"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["summary", "key_points", "decisions", "action_items"],
-    "additionalProperties": False,
-}
-
-CHUNK_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "key_points": {"type": "array", "items": {"type": "string"}},
-        "decisions": {"type": "array", "items": {"type": "string"}},
-        "action_items": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "task": {"type": "string"},
-                    "owner": {"type": "string"},
-                    "due_date": {"type": "string"},
-                },
-                "required": ["task", "owner", "due_date"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["key_points", "decisions", "action_items"],
-    "additionalProperties": False,
-}
-
-
-def _repair_json(bad_json: str) -> Dict[str, Any]:
-    """For improved output from LLMs: Best-effort JSON extraction when the model ignores structured output."""
-    clean = bad_json.replace("```json", "").replace("```", "").strip()
-    m = re.search(r"(\{.*\})", clean, re.DOTALL)
-    if m:
-        clean = m.group(1)
-    try:
-        return json.loads(clean)
-    except json.JSONDecodeError:
-        return {
-            "summary": "Error parsing JSON from LLM output.",
-            "key_points": [],
-            "decisions": [],
-            "action_items": [],
-        }
 
 
 def _is_localhost_url(base_url: str) -> bool:
@@ -115,7 +67,7 @@ def _ollama_chat(
     schema: Optional[Dict[str, Any]] = None,
     temperature: float = 0.2,
     num_predict: Optional[int] = None,
-    timeout: int = 600,
+    timeout: Optional[int] = 600,
     stream: bool = False,
 ) -> str:
     """Call Ollama /api/chat and return the assistant message content as a string."""
@@ -137,23 +89,43 @@ def _ollama_chat(
 
     if not stream:
         resp = requests.post(url, json=payload, timeout=timeout)
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            try:
+                err_text = resp.json().get("error", resp.text)
+                raise RuntimeError(f"Ollama HTTP {resp.status_code}: {err_text}")
+            except ValueError:
+                resp.raise_for_status()
         data = resp.json()
         return (data.get("message") or {}).get("content", "") or ""
 
     # Streaming response: NDJSON
     content = ""
     with requests.post(url, json=payload, timeout=timeout, stream=True) as resp:
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            try:
+                err_text = resp.json().get("error", resp.text)
+                raise RuntimeError(f"Ollama HTTP {resp.status_code}: {err_text}")
+            except ValueError:
+                resp.raise_for_status()
         for line in resp.iter_lines():
             if not line:
                 continue
             data = json.loads(line)
             if "error" in data:
                 raise RuntimeError(data["error"])
-            token = (data.get("message") or {}).get("content", "") or ""
+            
+            msg = data.get("message") or {}
+            token = msg.get("content", "") or ""
+            think_token = msg.get("thinking", "") or ""
+            
+            if think_token:
+                print(think_token, end="", flush=True)
+            if token:
+                print(token, end="", flush=True)
+                
             content += token
             if data.get("done"):
+                print() # Add a finishing newline
                 break
     return content
 
@@ -280,114 +252,79 @@ def generate_minutes(
     if not transcript_text:
         raise ValueError("Transcript is empty.")
 
-    # Chunk transcript without truncating meeting content, while retaining speaker turns.
-    # Returns a list with chunks
     chunks = _chunk_by_turns(transcript_text, max_chars=6500)
-
-    # Summarize chunks into structured notes (hierarchical summarization).
     stream = os.getenv("OLLAMA_STREAM", "0").strip().lower() in {"1", "true", "yes"}
-    chunk_notes: List[Dict[str, Any]] = []
-    if len(chunks) > 1:
-        # More than 1 chunk i.e. longer audio needs multiple round of processing 
-        # to support the context window of the LLM and not lose any data
+
+    if len(chunks) <= 1 or not RAG_AVAILABLE:
+        # Short transcript or RAG disabled -> direct fallback
+        final_input = transcript_text
+    else:
+        # RAG Logic Phase
+        topics_list = []
         for idx, chunk in enumerate(chunks, start=1):
             messages = [
                 {
                     "role": "system",
-                    "content": (
-                        "Extract ONLY from the provided chunk. "
-                        "Return key points, decisions, and action items. "
-                        "If unknown, use 'TBD'."
-                    ),
+                    "content": "Identify up to 3 most important topics discussed in this chunk. Return ONLY a comma-separated list of short topic names without numbers or explanations."
                 },
-                {
-                    "role": "user",
-                    "content": f"Transcript chunk {idx} of {len(chunks)}:\n\n{chunk}",
-                },
+                {"role": "user", "content": f"Chunk:\n\n{chunk}"},
             ]
-
-            # First attempt: structured output
+            
             content = _ollama_chat(
-                base_url,
-                model,
-                messages,
-                schema=CHUNK_SCHEMA,
-                temperature=0.2,
-                num_predict=256,
-                timeout=600,
-                stream=stream,
+                base_url, model, messages, temperature=0.1, timeout=None, stream=stream
             )
-
-            note = _repair_json(content)
-            # Ensure required keys exist even if the model ignored schema
-            note.setdefault("key_points", [])
-            note.setdefault("decisions", [])
-            note.setdefault("action_items", [])
-            chunk_notes.append(note)
-
-        # merge the minutes from each chunk into one variable
-        merged = _merge_chunk_notes(chunk_notes)
-
+            # Extracted distinct topic phrases
+            topics = [t.strip().strip('-*').replace('\n','') for t in content.split(',') if t.strip()]
+            topics_list.extend(topics)
+            
+        unique_topics = []
+        for t in topics_list:
+            if t.lower() not in [ut.lower() for ut in unique_topics]:
+                unique_topics.append(t)
+        unique_topics = unique_topics[:6] # Limit topics to avoid gigantic payloads
+        
+        # Build vector retrieval index via DocumentRAG
+        rag = DocumentRAG()
+        rag_chunks = _chunk_by_turns(transcript_text, max_chars=1200)
+        rag.build_index(rag_chunks)
+        
+        # Search the Exact Quotes
+        context_blocks = []
+        for topic in unique_topics:
+            retrieved = rag.retrieve(f"Find discussions, decisions, and action items about: {topic}", k=3)
+            context_blocks.append(f"### Topic: {topic}\n" + "\n".join(retrieved))
+            
         final_input = (
-            "Here are aggregated notes extracted from the full transcript. "
-            "Use these to write final minutes.\n\n"
-            + json.dumps(merged, ensure_ascii=False, indent=2)
+            "Here is the exact retrieved context from the meeting organized by topic. "
+            "Use these EXACT facts to generate your final minutes, decisions, and action items.\n\n"
+            + "\n\n".join(context_blocks)
         )
-    else:
-        # Short transcript: send directly for best fidelity.
-        final_input = transcript_text
 
     # Final minutes (structured output)
     final_messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Meeting transcript or notes:\n\n{final_input}"},
+        {"role": "user", "content": f"Meeting transcription and details:\n\n{final_input}"},
     ]
 
     final_content = _ollama_chat(
         base_url,
         model,
         final_messages,
-        schema=MINUTES_SCHEMA,
         temperature=0.2,
-        num_predict=512,
-        timeout=900,
+        timeout=None,
         stream=stream,
     )
 
-    # format the output from ollama/LLMs for better output
-    data = _repair_json(final_content)
-    data.setdefault("summary", "N/A")
-    data.setdefault("key_points", [])
-    data.setdefault("decisions", [])
-    data.setdefault("action_items", [])
+    # Clean markdown fences if the model outputted them
+    final_content = final_content.strip()
+    if final_content.startswith("```markdown"):
+        final_content = final_content.replace("```markdown\n", "", 1)
+    if final_content.startswith("```"):
+        final_content = final_content.replace("```\n", "", 1)
+    if final_content.endswith("```"):
+        final_content = final_content[:-3]
 
-    # vibe-coded to reduce LOC. Looks rather complicated, 
-    # but more or less is List Comprehension
-    md: List[str] = [
-        f"# {title}",
-        "",
-        f"**Date:** {datetime.now().strftime('%Y-%m-%d')}",
-        "",
-        "## 📝 Executive Summary",
-        str(data.get("summary", "N/A")).strip(),
-        "",
-        "## 🔑 Key Points",
-    ]
-    md += [f"- {kp}" for kp in (data.get("key_points") or [])] or ["- (None)"]
-    md += ["", "## 🤝 Decisions Made"]
-    md += [f"- {d}" for d in (data.get("decisions") or [])] or ["- (None)"]
-    md += ["", "## ✅ Action Items"]
-
-    # extract action items from the meeting
-    actions = data.get("action_items") or []
-    if actions:
-        md += ["", "| Task | Owner | Due |", "|---|---|---|"]
-        for a in actions:
-            md += [f"| {a.get('task','').strip()} | {a.get('owner','').strip()} | {a.get('due_date','').strip()} |"]
-    else:
-        md += ["- (None)"]
-
-    md_content = "\n".join(md).strip() + "\n"
+    md_content = f"# {title}\n\n**Date:** {datetime.now().strftime('%Y-%m-%d')}\n\n" + final_content.strip() + "\n"
 
     out_dir = os.path.dirname(transcript_path)
     out_path = os.path.join(out_dir, "meeting_minutes.md")

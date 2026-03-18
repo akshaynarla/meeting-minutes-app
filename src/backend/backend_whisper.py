@@ -66,11 +66,13 @@ def process_audio(
     # 1) Transcribe using WhisperX. Language is auto-identified by the model.
     batch_size = _default_batch_size(device, model_size)
     try:
+        threads = os.cpu_count() or 4
         asr_model = whisperx.load_model(
             model_size,
             device,
             compute_type=compute_type,
-            language=language
+            language=language,
+            threads=threads
         )
     except Exception as e:
         raise RuntimeError(
@@ -85,26 +87,27 @@ def process_audio(
         gc.collect()
 
     # 2) Alignment (improves timestamps; also used for speaker assignment)
-    try:
-        # forces the model to align speech with audio at a word level
-        model_a, metadata = whisperx.load_align_model(
-            language_code=result.get("language"),
-            device=device
-        )
-        result = whisperx.align(
-            result["segments"],
-            model_a,
-            metadata,
-            audio_path,
-            device,
-            return_char_alignments=False
-        )
-    finally:
+    if diarize:
         try:
-            del model_a
-        except Exception:
-            pass
-        gc.collect()
+            # forces the model to align speech with audio at a word level
+            model_a, metadata = whisperx.load_align_model(
+                language_code=result.get("language"),
+                device=device
+            )
+            result = whisperx.align(
+                result["segments"],
+                model_a,
+                metadata,
+                audio_path,
+                device,
+                return_char_alignments=False
+            )
+        finally:
+            try:
+                del model_a
+            except Exception:
+                pass
+            gc.collect()
 
     # 3) Diarization (identify speakers also)
     # Default uses: pyannote/speaker-diarization-3.1. Should be sufficient.

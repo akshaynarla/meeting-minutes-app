@@ -7,3 +7,5 @@ numpy
 scipy
 sounddevice
 silero-vad
+faiss-cpu
+sentence-transformers
