@@ -19,6 +19,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--sample-rate", type=int, default=16000, help="Input sample rate for the mic stream.")
     p.add_argument("--block-ms", type=int, default=500, help="Audio block size in milliseconds.")
     p.add_argument("--vad-threshold", type=float, default=0.6, help="VAD threshold (tune for noisy rooms).")
+    p.add_argument("--translate", action="store_true", help="Translate speech to English (any language → English).")
     return p.parse_args()
 
 
@@ -26,12 +27,14 @@ def main() -> int:
     args = _parse_args()
     blocksize = int(args.sample_rate * args.block_ms / 1000)
 
+    task = "translate" if args.translate else "transcribe"
     lt = LiveTranscriber(
         model_size=args.model,
         device=args.device,
         compute_type=None if args.compute_type == "auto" else args.compute_type,
         vad_threshold=args.vad_threshold,
         sample_rate=16000,  # internal processing rate
+        task=task,
     )
 
     q: queue.Queue[np.ndarray] = queue.Queue()
@@ -42,7 +45,8 @@ def main() -> int:
         # indata is shape (frames, channels) float32
         q.put(indata.copy())
 
-    print("Listening. Press Ctrl+C to stop.", flush=True)
+    mode = "TRANSLATE → English" if args.translate else "TRANSCRIBE"
+    print(f"Mode: {mode}. Listening. Press Ctrl+C to stop.", flush=True)
 
     try:
         with sd.InputStream(

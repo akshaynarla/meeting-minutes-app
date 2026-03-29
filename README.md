@@ -21,6 +21,7 @@ export OLLAMA_ALLOW_REMOTE=1
 - 👥 Speaker identification (diarization; optional)
 - 📝 AI-generated meeting minutes with action items (Ollama)
 - 🎧 Live transcription from microphone (CLI)
+- 🌍 Live speech translation with optional TTS voice output
 
 ---
 
@@ -58,6 +59,14 @@ Diarization requires a Hugging Face token and accepting the model terms:
    - `pyannote/speaker-diarization`
    - `pyannote/segmentation`
 
+### 4) (Optional) TTS voice output for translation
+
+```bash
+pip install piper-tts
+```
+
+Uses [Piper](https://github.com/rhasspy/piper) — fast, offline neural TTS that runs on CPU. Voice models (~50-100 MB) are auto-downloaded on first use.
+
 ---
 
 ## 🚀 Usage
@@ -79,6 +88,19 @@ python live_cli.py --model tiny --device auto
 ```
 
 Press `Ctrl+C` to stop.
+
+### Live translation (CLI)
+
+```bash
+cd src
+# Text-only translation (works on CPU)
+python live_translate_cli.py --source en --target de --model qwen2.5:1.5b
+
+# With TTS voice output (best with GPU)
+python live_translate_cli.py --source en --target de --model qwen2.5:1.5b --tts
+```
+
+See `python live_translate_cli.py --help` for all options.
 
 ---
 
@@ -116,12 +138,16 @@ sudo apt-get install libportaudio2
 src/
 ├── app.py
 ├── live_cli.py
+├── live_translate_cli.py
 └── backend/
     ├── __init__.py
     ├── device_utils.py
     ├── backend_whisper.py
     ├── backend_llm.py
-    └── live_transcript.py
+    ├── backend_rag.py
+    ├── live_transcript.py
+    ├── live_translate.py
+    └── tts_engine.py
 
 outputs/
 temp_uploads/
@@ -142,3 +168,4 @@ In noisy rooms you may need to tune `--vad-threshold` (try values between 0.3 an
 - [WhisperX](https://github.com/m-bain/whisperX) — Word-level timestamps + diarization
 - [Ollama](https://ollama.com) — Local LLM inference
 - [Silero VAD](https://github.com/snakers4/silero-vad) — Voice activity detection
+- [Piper](https://github.com/rhasspy/piper) — Fast, offline neural TTS (optional)

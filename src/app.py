@@ -4,7 +4,7 @@ import requests
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import streamlit as st
-from backend import process_audio, generate_minutes, LiveTranscriber
+from backend import process_audio, generate_minutes, LiveTranscriber, SUPPORTED_LANGUAGES
 
 def get_ollama_models(base_url="http://localhost:11434"):
     try:
@@ -60,7 +60,7 @@ with st.sidebar:
         help="Off by default to guarantee prompts stay on this machine. Turn on only if you intentionally run Ollama remotely."
     )
 
-tab1, tab2, tab3 = st.tabs(["🎙️ Process Audio", "📝 Generate Minutes", "🎧 Live"])
+tab1, tab2, tab3, tab4 = st.tabs(["🎙️ Process Audio", "📝 Generate Minutes", "🎧 Live", "🌍 Live Translation"])
 
 # === TAB 1: Process Audio ===
 with tab1:
@@ -159,3 +159,58 @@ with tab3:
             st.success("Live backend initialized.")
         except Exception as e:
             st.error(f"Failed to init live backend: {e}")
+
+# === TAB 4: Live Translation ===
+with tab4:
+    st.header("🌍 Live Translation")
+    st.write(
+        "Translate live speech in real time. Speak in one language and see "
+        "(and optionally hear) the translation in another."
+    )
+
+    lang_codes = list(SUPPORTED_LANGUAGES.keys())
+    lang_names = list(SUPPORTED_LANGUAGES.values())
+
+    col_src, col_tgt = st.columns(2)
+    with col_src:
+        src_idx = lang_codes.index("en") if "en" in lang_codes else 0
+        source_lang = st.selectbox("Source Language", lang_names, index=src_idx, key="trans_source")
+    with col_tgt:
+        tgt_idx = lang_codes.index("de") if "de" in lang_codes else 1
+        target_lang = st.selectbox("Target Language", lang_names, index=tgt_idx, key="trans_target")
+
+    st.markdown("### TTS Voice Output")
+    enable_tts = st.checkbox(
+        "Enable TTS (speak translations aloud)",
+        value=False,
+        help="Requires piper-tts (pip install piper-tts). Runs fully offline on CPU.",
+    )
+
+    if enable_tts:
+        from backend.tts_engine import PIPER_VOICES, LANG_TO_VOICE
+        suggested = LANG_TO_VOICE.get(target_lang, "en_US-amy-medium")
+        voice_options = list(PIPER_VOICES.keys())
+        default_idx = voice_options.index(suggested) if suggested in voice_options else 0
+        tts_voice = st.selectbox("TTS Voice", voice_options, index=default_idx)
+    else:
+        tts_voice = None
+
+    st.divider()
+    st.markdown("### CLI Command")
+    st.write("Run this command in your terminal for live translation:")
+
+    # Build the CLI command
+    src_code = lang_codes[lang_names.index(source_lang)]
+    tgt_code = lang_codes[lang_names.index(target_lang)]
+    cmd = f"python live_translate_cli.py --source {src_code} --target {tgt_code} --model {ollama_model}"
+    if device != "auto":
+        cmd += f" --device {device}"
+    if enable_tts:
+        cmd += f" --tts --voice {tts_voice}"
+
+    st.code(cmd, language="bash")
+
+    st.info(
+        "💡 **Tip:** Streamlit cannot stream live microphone audio. "
+        "Use the CLI command above for the real-time experience."
+    )

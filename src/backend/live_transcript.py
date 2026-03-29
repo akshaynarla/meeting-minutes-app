@@ -33,6 +33,7 @@ class LiveTranscriber:
         vad_threshold: float = 0.6,
         sample_rate: int = 16000,
         use_silero_vad: bool = True,
+        task: str = "transcribe",
     ):
         cfg = resolve_config(device, compute_type)
         self.device = cfg.device
@@ -47,19 +48,19 @@ class LiveTranscriber:
 
         self.sr = int(sample_rate)
         self.vad_threshold = float(vad_threshold)
+        self.task = task if task in ("transcribe", "translate") else "transcribe"
+
+        # RMS threshold is always needed (used as fallback even when Silero is primary)
+        self.vad_rms_threshold = float(max(0.003, min(0.05, vad_threshold * 0.025)))
 
         # VAD selection: Silero (default) or RMS (fallback)
         self.use_silero_vad = use_silero_vad and SILERO_VAD_AVAILABLE
         if self.use_silero_vad:
             self.vad_model = load_silero_vad()
-        else:
-            # RMS-based VAD (fallback if Silero VAD not available)
-            # Map threshold (0.6) into a practical RMS threshold for float32 audio in [-1, 1].
-            self.vad_rms_threshold = float(max(0.003, min(0.05, vad_threshold * 0.025)))
 
         self.min_speech_ms = 250
-        self.min_silence_ms = 800
-        self.max_segment_s = 20.0
+        self.min_silence_ms = 500   # was 800 – react faster to pauses
+        self.max_segment_s = 8.0    # was 20 – shorter clips = faster results
 
         # Streaming state
         self._in_speech = False
@@ -118,6 +119,7 @@ class LiveTranscriber:
             best_of=1,
             vad_filter=False,
             condition_on_previous_text=False,
+            task=self.task,
         )
         return " ".join(s.text.strip() for s in segments if getattr(s, "text", "").strip()).strip()
 

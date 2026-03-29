@@ -9,3 +9,5 @@ sounddevice
 silero-vad
 faiss-cpu
 sentence-transformers
+# Optional: Piper TTS for live translation voice output
+# pip install piper-tts
